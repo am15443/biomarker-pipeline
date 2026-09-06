@@ -26,13 +26,18 @@ import pandas as pd
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
-from pyspark.sql.window import Window
 
 USER = "am15443_nyu_edu"
 BASE = f"hdfs:///user/{USER}/biomarker"
-IN = f"{BASE}/parquet/brca_long"
-OUT_PARQUET = f"{BASE}/parquet/brca_diffexp"
-OUT_CSV = f"{BASE}/results/brca_diffexp_csv"
+
+if len(sys.argv) != 2:
+    print("usage: 03_diffexp_ttest_v2.py <CANCER_CODE>", file=sys.stderr)
+    sys.exit(2)
+CANCER = sys.argv[1].upper()
+
+IN = f"{BASE}/parquet/tcga_long/{CANCER}"
+OUT_PARQUET = f"{BASE}/parquet/diffexp/{CANCER}"
+OUT_CSV = f"{BASE}/results/diffexp_csv/{CANCER}"
 
 TUMOR = "Primary Tumor"
 NORMAL = "Solid Tissue Normal"
@@ -44,7 +49,7 @@ MIN_FRAC = 0.20
 
 def main():
     spark = (SparkSession.builder
-             .appName("brca_diffexp_ttest")
+             .appName(f"diffexp_{CANCER}")
              .getOrCreate())
     spark.sparkContext.setLogLevel("WARN")
 
@@ -123,19 +128,43 @@ def main():
 
     stats = stats.withColumn("pvalue", t_sf_pvalue(F.col("t_stat"), F.col("df")))
 
-    # ---- 6. Benjamini-Hochberg FDR ----
-    # BH: sort by p ascending, rank r, adjusted = p * m / r, then enforce monotonicity.
+    # ---- 6. Benjamini-Hochberg FDR (no window functions) ----
+    # BH adjusted p = min over k>=i of ( p_(k) * m / k ), enforcing monotonicity,
+    # where genes are ranked by ascending p-value.
+    #
+    # We avoid a global-order window (which funnels all rows to one partition)
+    # by computing each gene's rank as "how many p-values are <= mine" via a
+    # distributed self-join aggregation, then the running-min for monotonicity
+    # with a second small aggregation. Both are partitioned joins Spark spreads
+    # across the cluster.
     m = stats.count()
-    w_rank = Window.orderBy(F.col("pvalue").asc())
-    ranked = stats.withColumn("rank", F.row_number().over(w_rank))
-    ranked = ranked.withColumn("bh_raw",
-                               F.col("pvalue") * F.lit(m) / F.col("rank"))
-    # Enforce monotonic non-decreasing from the largest p downward via cumulative min
-    # over descending rank. Implemented as running min of bh_raw ordered by rank desc.
-    w_cummin = Window.orderBy(F.col("rank").desc()).rowsBetween(
-        Window.unboundedPreceding, Window.currentRow)
-    ranked = ranked.withColumn("fdr",
-                               F.least(F.lit(1.0), F.min("bh_raw").over(w_cummin)))
+
+    pvals = stats.select("gene_id", "pvalue")
+
+    # rank_i = count of genes with pvalue <= this gene's pvalue (dense over ties
+    # resolved by <=, matching BH's use of the largest rank at tied p-values).
+    a = pvals.alias("a")
+    b = pvals.alias("b")
+    ranks = (a.join(b, F.col("b.pvalue") <= F.col("a.pvalue"))
+             .groupBy(F.col("a.gene_id").alias("gene_id"),
+                      F.col("a.pvalue").alias("pvalue"))
+             .agg(F.count(F.lit(1)).alias("rank")))
+
+    # raw BH value per gene
+    ranks = ranks.withColumn(
+        "bh_raw", F.col("pvalue") * F.lit(float(m)) / F.col("rank"))
+
+    # Monotonicity: fdr_i = min over all genes j with rank_j >= rank_i of bh_raw_j.
+    # Compute via a range self-join on rank, aggregated with min. This is a
+    # partitioned join, not a single-partition window.
+    r1 = ranks.alias("r1")
+    r2 = ranks.alias("r2")
+    fdr = (r1.join(r2, F.col("r2.rank") >= F.col("r1.rank"))
+           .groupBy(F.col("r1.gene_id").alias("gene_id"))
+           .agg(F.least(F.lit(1.0), F.min(F.col("r2.bh_raw"))).alias("fdr")))
+
+    ranked = (stats.join(ranks.select("gene_id", "rank"), on="gene_id")
+                   .join(fdr, on="gene_id"))
 
     results = ranked.select(
         "gene_id", "log2fc", "t_stat", "df", "pvalue", "fdr",

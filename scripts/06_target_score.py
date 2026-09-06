@@ -26,16 +26,28 @@ from pyspark.sql import types as T
 
 USER = "am15443_nyu_edu"
 BASE = f"hdfs:///user/{USER}/biomarker"
-GTEX_LONG = f"{BASE}/parquet/gtex_breast_long"
-BRCA_DE = f"{BASE}/parquet/brca_diffexp"
+
+import sys
+if len(sys.argv) != 2:
+    print("usage: 06_target_score.py <CANCER_CODE>", file=sys.stderr)
+    sys.exit(2)
+CANCER = sys.argv[1].upper()
+
+# each cancer's matched healthy GTEx tissue
+TISSUE_OF_CANCER = {"BRCA": "BREAST", "LUAD": "LUNG", "THCA": "THYROID",
+                    "PRAD": "PROSTATE", "COAD": "COLON", "KIRC": "KIDNEY"}
+TISSUE = TISSUE_OF_CANCER[CANCER]
+
+GTEX_LONG = f"{BASE}/parquet/gtex_long/{TISSUE}"
+BRCA_DE = f"{BASE}/parquet/diffexp/{CANCER}"
 GENE_MAP = f"{BASE}/raw/gene_map.tsv"
-OUT_PARQUET = f"{BASE}/parquet/brca_target_score"
-OUT_CSV = f"{BASE}/results/brca_target_score_csv"
+OUT_PARQUET = f"{BASE}/parquet/target_score/{CANCER}"
+OUT_CSV = f"{BASE}/results/target_score_csv/{CANCER}"
 
 
 def main():
     spark = (SparkSession.builder
-             .appName("brca_target_score")
+             .appName(f"target_score_{CANCER}")
              .getOrCreate())
     spark.sparkContext.setLogLevel("WARN")
 
