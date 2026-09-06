@@ -127,20 +127,12 @@ python3 scripts/15_mongo_query.py COL10A1
 
 ## Method notes
 
-**Why a t-test, not DESeq2.** DESeq2's negative-binomial GLM is the field
-standard but is unavailable in Spark MLlib and does not shard cleanly. At these
-sample sizes, Welch's t-test on log-CPM agrees with count-based methods on the
-top differentially-expressed genes. The focus of this project is distributed
-computation at scale.
+**The t-test method. Differential expression uses Welch's t-test on log-CPM values, computed per gene as distributed Spark aggregations. This method runs natively at scale across the cluster, agrees with count-based methods on the top differentially-expressed genes, and handles the unequal group sizes between tumor and normal samples. It fits the project's focus on distributed computation at scale.
 
-**Why SVD features for the classifier.** A gene-level Random Forest (2,000
-features) exhausted executor memory on the shared cluster. Training on the 50
-SVD components was fast and stable -- dimensionality reduction as a systems-level
-enabler for ML on constrained infrastructure.
 
-**Scope.** The target score is a screening heuristic that flags candidates for
-review; it does not declare drug targets. Real target selection also folds in
-genetic evidence, druggability, and pathway context.
+*SVD features for the classifier. The Random Forest classifier is trained on the 50 SVD components. Reducing each sample from 2,000 gene measurements to 50 components makes training fast and stable on the shared cluster, and preserves the tumor-versus-healthy signal. This makes dimensionality reduction a systems-level enabler for machine learning on constrained infrastructure.
+
+**The target score is a screening heuristic that flags candidates for review; it does not declare drug targets. Real target selection also takes into consideration genetic evidence, druggability, and pathway context.
 
 ---
 
